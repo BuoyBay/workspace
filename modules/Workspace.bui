@@ -1,0 +1,651 @@
+Public Function WorkspaceSupported() As Boolean
+    #If TargetMac Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+#If TargetMac Then
+    Private Declare Function ObjClass Lib "objc" Alias "objc_getClass" (name As String) As Ptr
+    Private Declare Function Allocate Lib "Foundation" Selector "alloc" (cls As Ptr) As Ptr
+    Private Declare Function InitURL Lib "Foundation" Selector "initWithString:" (url As Ptr, text As Ptr) As Ptr
+    Private Declare Function InitFile Lib "Foundation" Selector "initFileURLWithPath:" (url As Ptr, text As Ptr) As Ptr
+    Private Declare Function URLPart Lib "Foundation" Selector "scheme" (url As Ptr) As Ptr
+    Private Declare Function URLHost Lib "Foundation" Selector "host" (url As Ptr) As Ptr
+    Private Declare Function URLUser Lib "Foundation" Selector "user" (url As Ptr) As Ptr
+    Private Declare Function URLPassword Lib "Foundation" Selector "password" (url As Ptr) As Ptr
+    Private Declare Function URLPath Lib "Foundation" Selector "path" (url As Ptr) As Ptr
+    Private Declare Function SharedWorkspace Lib "AppKit" Selector "sharedWorkspace" (cls As Ptr) As Ptr
+    Private Declare Function NativeOpen Lib "AppKit" Selector "openURL:" (workspace As Ptr, url As Ptr) As UInt8
+    Private Declare Function NativeHandler Lib "AppKit" Selector "URLForApplicationToOpenURL:" (workspace As Ptr, url As Ptr) As Ptr
+    Private Declare Function NativeApplication Lib "AppKit" Selector "URLForApplicationWithBundleIdentifier:" (workspace As Ptr, identifier As Ptr) As Ptr
+    Private Declare Function NewArray Lib "Foundation" Selector "new" (cls As Ptr) As Ptr
+    Private Declare Sub AddObject Lib "Foundation" Selector "addObject:" (items As Ptr, value As Ptr)
+    Private Declare Sub NativeReveal Lib "AppKit" Selector "activateFileViewerSelectingURLs:" (workspace As Ptr, urls As Ptr)
+    Private Declare Sub ReleaseObject Lib "CoreFoundation" Alias "CFRelease" (value As Ptr)
+
+    Private Function TextValue(value As Ptr) As String
+        If value = Nil Then Return ""
+        Return CType(CType(value, CFStringRef), String)
+    End Function
+
+    Private Function MakeURL(value As String, customScheme As Boolean) As Ptr
+        Dim trimmed As String = String.Trim(value)
+        For Each character As String In String.Chars(value)
+            Dim code As Integer = String.Asc(character)
+            If code < 32 Or code = 127 Then Throw New InvalidArgumentException("URL contains control characters")
+        Next
+        Dim text As CFStringRef = CType(trimmed, CFStringRef)
+        Dim url As Ptr = Nil
+        Try
+            url = InitURL(Allocate(ObjClass("NSURL")), text)
+        Finally
+            ReleaseObject(text)
+        End Try
+        If url = Nil Then Throw New InvalidArgumentException("Invalid external URL")
+        Try
+            Dim scheme As String = String.LCase(TextValue(URLPart(url)))
+            If scheme = "" Then Throw New InvalidArgumentException("An absolute URL is required")
+            If scheme = "file" Or scheme = "javascript" Or scheme = "data" Or scheme = "about" Then Throw New InvalidArgumentException("Use a dedicated API for files or embedded content")
+            If Not customScheme And scheme <> "https" And scheme <> "http" And scheme <> "mailto" And scheme <> "tel" Then Throw New InvalidArgumentException("URL scheme requires explicit custom-scheme opt-in")
+            If URLUser(url) <> Nil Or URLPassword(url) <> Nil Then Throw New InvalidArgumentException("URL credentials are not permitted")
+            If (scheme = "http" Or scheme = "https") And TextValue(URLHost(url)) = "" Then Throw New InvalidArgumentException("HTTP URL needs a host")
+            Return url
+        Catch e As Exception
+            ReleaseObject(url)
+            Throw e
+        End Try
+    End Function
+
+    Private Function MakeFile(file As FileSystemItem) As Ptr
+        If file = Nil Then Throw New InvalidArgumentException("A file is required")
+        For Each pathCharacter As String In String.Chars(file.NativePath)
+            If String.Asc(pathCharacter) = 0 Then Throw New InvalidArgumentException("File path contains NUL")
+        Next
+        If Not file.Exists() Then Throw New InvalidArgumentException("File does not exist")
+        Dim text As CFStringRef = CType(file.NativePath, CFStringRef)
+        Try
+            Dim url As Ptr = InitFile(Allocate(ObjClass("NSURL")), text)
+            If url = Nil Then Throw New InvalidArgumentException("Invalid file URL")
+            Return url
+        Finally
+            ReleaseObject(text)
+        End Try
+    End Function
+#End If
+
+''' Validation only. Never opens another app.
+Public Sub ValidateExternalURL(value As String, allowCustomScheme As Boolean = False)
+    #If TargetMac Then
+        Dim url As Ptr = MakeURL(value, allowCustomScheme)
+        ReleaseObject(url)
+    #ElseIf TargetLinux Or TargetWindows Then
+        PortableURL(value, allowCustomScheme)
+    #Else
+        Throw New Exception("Workspace integration requires macOS")
+    #End If
+End Sub
+
+''' Submits externally; may block/prompt. True means native acceptance, not content loaded.
+''' macOS: main thread. Linux: worker. Windows: STA worker; keep the caller alive.
+Public Function OpenExternalURL(value As String, allowCustomScheme As Boolean = False) As Boolean
+    #If TargetMac Then
+        Dim url As Ptr = MakeURL(value, allowCustomScheme)
+        Try
+            Return NativeOpen(SharedWorkspace(ObjClass("NSWorkspace")), url) <> 0
+        Finally
+            ReleaseObject(url)
+        End Try
+    #ElseIf TargetLinux Or TargetWindows Then
+        Dim url As String = PortableURL(value, allowCustomScheme)
+        #If TargetLinux Then
+            Return LinuxOpen(url)
+        #Else
+            Return WindowsOpen(url)
+        #End If
+    #Else
+        Throw New Exception("Workspace integration requires macOS")
+    #End If
+End Function
+
+''' Submits externally; may block/prompt. Opens only an existing file or folder.
+''' macOS: main thread. Linux: worker. Windows: STA worker. Native acceptance only.
+Public Function OpenFile(file As FileSystemItem) As Boolean
+    #If TargetMac Then
+        Dim url As Ptr = MakeFile(file)
+        Try
+            Return NativeOpen(SharedWorkspace(ObjClass("NSWorkspace")), url) <> 0
+        Finally
+            ReleaseObject(url)
+        End Try
+    #ElseIf TargetLinux Or TargetWindows Then
+        Dim filePath As String = PortableFile(file)
+        #If TargetLinux Then
+            Return LinuxOpen(LinuxFileURI(filePath))
+        #Else
+            Return WindowsOpen(filePath)
+        #End If
+    #Else
+        Throw New Exception("Workspace integration requires macOS")
+    #End If
+End Function
+
+''' Submits externally; may block. Validates all inputs before any reveal request.
+''' macOS: main thread. Linux: worker; D-Bus call timeout 5s (bus acquisition unbounded).
+''' Windows: STA worker; groups binary-identical parent PIDLs into selection requests.
+Public Sub RevealFiles(files As Array Of FileSystemItem)
+    #If TargetMac Then
+        If Array.Count(files) = 0 Then Throw New InvalidArgumentException("At least one file is required")
+        Dim urls As Ptr = NewArray(ObjClass("NSMutableArray"))
+        Try
+            For Each file As FileSystemItem In files
+                Dim url As Ptr = MakeFile(file)
+                AddObject(urls, url)
+                ReleaseObject(url)
+            Next
+            NativeReveal(SharedWorkspace(ObjClass("NSWorkspace")), urls)
+        Finally
+            ReleaseObject(urls)
+        End Try
+    #ElseIf TargetLinux Or TargetWindows Then
+        If Array.Count(files) = 0 Then Throw New InvalidArgumentException("At least one file is required")
+        Dim paths As Array Of String = []
+        For Each file As FileSystemItem In files
+            Array.Append(paths, PortableFile(file))
+        Next
+        #If TargetLinux Then
+            LinuxReveal(paths)
+        #Else
+            WindowsReveal(paths)
+        #End If
+    #Else
+        Throw New Exception("Workspace integration requires macOS")
+    #End If
+End Sub
+
+Public Function DefaultApplication(value As String, allowCustomScheme As Boolean = False) As Optional Of String
+    #If TargetMac Then
+        Dim url As Ptr = MakeURL(value, allowCustomScheme)
+        Try
+            Dim app As Ptr = NativeHandler(SharedWorkspace(ObjClass("NSWorkspace")), url)
+            If app = Nil Then Return None
+            Return Some(TextValue(URLPath(app)))
+        Finally
+            ReleaseObject(url)
+        End Try
+    #Else
+        Throw New Exception("Workspace integration requires macOS")
+    #End If
+End Function
+
+Public Function FindApplication(bundleIdentifier As String) As Optional Of String
+    #If TargetMac Then
+        If String.Trim(bundleIdentifier) = "" Then Throw New InvalidArgumentException("A bundle identifier is required")
+        Dim text As CFStringRef = CType(bundleIdentifier, CFStringRef)
+        Try
+            Dim app As Ptr = NativeApplication(SharedWorkspace(ObjClass("NSWorkspace")), text)
+            If app = Nil Then Return None
+            Return Some(TextValue(URLPath(app)))
+        Finally
+            ReleaseObject(text)
+        End Try
+    #Else
+        Throw New Exception("Workspace integration requires macOS")
+    #End If
+End Function
+
+''' Read-only compile-target predicate. Does not load libraries, connect or launch.
+Public Function OpenAndRevealSupported() As Boolean
+    #If TargetMac Or TargetLinux Or TargetWindows Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+''' Read-only library probe; does not connect to D-Bus or check for a handler.
+Public Function OpenAndRevealAvailable() As Boolean
+    #If TargetMac Then
+        Return True
+    #ElseIf TargetLinux Then
+        Return System.IsLibraryAvailable("libgio-2.0.so.0") And System.IsLibraryAvailable("libglib-2.0.so.0") And System.IsLibraryAvailable("libgobject-2.0.so.0")
+    #ElseIf TargetWindows Then
+        Return System.IsLibraryAvailable("shell32") And System.IsLibraryAvailable("ole32") And System.IsLibraryAvailable("kernel32")
+    #Else
+        Return False
+    #End If
+End Function
+
+''' Native Linux/Windows operation failure. Input errors use InvalidArgumentException.
+Public Class WorkspaceException Inherits RuntimeException
+    Private Property mDomain As String
+    Private Property mNativeCode As Integer
+    Private Property mOperation As String
+    Public Property Domain As String
+        Get
+            Return mDomain
+        End Get
+    End Property
+    Public Property NativeCode As Integer
+        Get
+            Return mNativeCode
+        End Get
+    End Property
+    Public Property Operation As String
+        Get
+            Return mOperation
+        End Get
+    End Property
+    Public Sub Constructor(operation As String, domain As String, code As Integer)
+        Super.Constructor(operation + " failed (" + domain + ": " + Str(code) + ")", code)
+        mDomain = domain
+        mNativeCode = code
+        mOperation = operation
+    End Sub
+End Class
+
+#If TargetLinux Or TargetWindows Then
+Private Function NativeBuffer(size As Integer) As Bytes
+    Dim buffer As New Bytes()
+    For i As Integer = 0 To size - 1
+        buffer.Append(0)
+    Next
+    Return buffer
+End Function
+
+Private Sub NativeWritePointer(buffer As Bytes, offset As Integer, value As Ptr)
+    ' All supported Linux/Windows targets have 64-bit little-endian pointers.
+    Dim bits As UInt64 = CType(value, Integer)
+    For i As Integer = 0 To 7
+        buffer.SetItem(offset + i, bits Mod 256)
+        bits = bits \ 256
+    Next
+End Sub
+
+Private Sub NativeWrite32(buffer As Bytes, offset As Integer, value As UInt32)
+    Dim bits As UInt64 = value
+    For i As Integer = 0 To 3
+        buffer.SetItem(offset + i, bits Mod 256)
+        bits = bits \ 256
+    Next
+End Sub
+
+Private Function NativeRead32(buffer As Bytes, offset As Integer) As UInt32
+    Dim bits As UInt64 = 0
+    For i As Integer = 3 To 0 Step -1
+        bits = bits * 256 + buffer.Item(offset + i)
+    Next
+    Return bits
+End Function
+
+Private Sub ValidateIPLiteral(address As String)
+    Dim value As String = address
+    If String.Contains(value, ".") Then
+        Dim lastColon As Integer = String.InStrRev(value, ":")
+        If lastColon = 0 Then Throw New InvalidArgumentException("Invalid IP literal")
+        Dim octets As Array Of String = String.Split(String.Mid(value, lastColon + 1), ".")
+        If Array.Count(octets) <> 4 Then Throw New InvalidArgumentException("Invalid IP literal")
+        For Each octet As String In octets
+            If String.Len(octet) = 0 Or String.Len(octet) > 3 Then Throw New InvalidArgumentException("Invalid IP literal")
+            If String.Len(octet) > 1 And String.StartsWith(octet, "0") Then Throw New InvalidArgumentException("Invalid IP literal")
+            Dim number As Integer = 0
+            For Each digit As String In String.Chars(octet)
+                If Not String.Contains("0123456789", digit) Then Throw New InvalidArgumentException("Invalid IP literal")
+                number = number * 10 + String.Asc(digit) - 48
+            Next
+            If number > 255 Then Throw New InvalidArgumentException("Invalid IP literal")
+        Next
+        value = String.Left(value, lastColon) + "0:0"
+    End If
+    Dim compression As Integer = String.InStr(value, "::")
+    If String.Contains(value, ":::") Then Throw New InvalidArgumentException("Invalid IP literal")
+    If compression > 0 Then
+        If String.InStr(value, "::", compression + 2) > 0 Then Throw New InvalidArgumentException("Invalid IP literal")
+    End If
+    If String.StartsWith(value, ":") And Not String.StartsWith(value, "::") Then Throw New InvalidArgumentException("Invalid IP literal")
+    If String.EndsWith(value, ":") And Not String.EndsWith(value, "::") Then Throw New InvalidArgumentException("Invalid IP literal")
+    Dim groups As Integer = 0
+    For Each piece As String In String.Split(value, ":")
+        If piece <> "" Then
+            groups += 1
+            If String.Len(piece) > 4 Then Throw New InvalidArgumentException("Invalid IP literal")
+            For Each digit As String In String.Chars(piece)
+                If Not String.Contains("0123456789abcdef", digit) Then Throw New InvalidArgumentException("Invalid IP literal")
+            Next
+        End If
+    Next
+    If compression = 0 And groups <> 8 Then Throw New InvalidArgumentException("Invalid IP literal")
+    If compression > 0 And groups >= 8 Then Throw New InvalidArgumentException("Invalid IP literal")
+End Sub
+
+Private Function PortableURL(value As String, customScheme As Boolean) As String
+    For Each character As String In String.Chars(value)
+        Dim code As Integer = String.Asc(character)
+        If code < 32 Or (code >= 127 And code <= 159) Then Throw New InvalidArgumentException("URL contains control characters")
+    Next
+    Dim url As String = String.Trim(value)
+    Dim colon As Integer = String.InStr(url, ":")
+    If colon < 2 Then Throw New InvalidArgumentException("An absolute URL is required")
+    Dim scheme As String = String.LCase(String.Left(url, colon - 1))
+    If String.Len(scheme) = 1 Then Throw New InvalidArgumentException("Drive paths are not external URLs")
+    Dim index As Integer = 0
+    For Each character As String In String.Chars(scheme)
+        Dim letter As Boolean = String.Contains("abcdefghijklmnopqrstuvwxyz", character)
+        If Not letter And (index = 0 Or Not String.Contains("0123456789+.-", character)) Then Throw New InvalidArgumentException("Invalid URL scheme")
+        index += 1
+    Next
+    If scheme = "file" Or scheme = "javascript" Or scheme = "data" Or scheme = "about" Then Throw New InvalidArgumentException("Use a dedicated API for files or embedded content")
+    If Not customScheme And scheme <> "http" And scheme <> "https" And scheme <> "mailto" And scheme <> "tel" Then Throw New InvalidArgumentException("URL scheme requires explicit custom-scheme opt-in")
+    Dim rest As String = String.Mid(url, colon + 1)
+    If rest = "" Then Throw New InvalidArgumentException("URL needs a destination")
+    ' Reject ambiguous backslashes, unescaped whitespace and malformed escapes.
+    Dim chars As Array Of String = String.Chars(url)
+    For i As Integer = 0 To Array.Count(chars) - 1
+        Dim scalar As Integer = String.Asc(chars(i))
+        If chars(i) = " " Or chars(i) = "\\" Or String.Contains("<>\"{}|^`", chars(i)) Then Throw New InvalidArgumentException("Invalid URL character")
+        If scalar = 160 Or scalar = 5760 Or (scalar >= 8192 And scalar <= 8202) Or scalar = 8232 Or scalar = 8233 Or scalar = 8239 Or scalar = 8287 Or scalar = 12288 Then Throw New InvalidArgumentException("URL contains whitespace")
+        If chars(i) = "%" Then
+            If i + 2 >= Array.Count(chars) Then Throw New InvalidArgumentException("Invalid URL escape")
+            Dim high As Integer = String.IndexOf("0123456789abcdef", String.LCase(chars(i + 1)))
+            Dim low As Integer = String.IndexOf("0123456789abcdef", String.LCase(chars(i + 2)))
+            If high < 0 Or low < 0 Then Throw New InvalidArgumentException("Invalid URL escape")
+            Dim decoded As Integer = high * 16 + low
+            If decoded < 32 Or decoded = 127 Then Throw New InvalidArgumentException("URL contains escaped controls")
+        End If
+    Next
+    If String.StartsWith(rest, "//") Then
+        Dim authority As String = String.Mid(rest, 3)
+        Dim finish As Integer = String.Len(authority) + 1
+        For Each separator As String In ["/", "?", "#"]
+            Dim found As Integer = String.InStr(authority, separator)
+            If found > 0 And found < finish Then finish = found
+        Next
+        authority = String.Left(authority, finish - 1)
+        If String.Contains(authority, "@") Then Throw New InvalidArgumentException("URL credentials are not permitted")
+        If authority = "" Or String.StartsWith(authority, ":") Then Throw New InvalidArgumentException("URL needs a host")
+        If String.Contains(authority, "%40") Or String.Contains(authority, "%3a") Or String.Contains(authority, "%2f") Or String.Contains(authority, "%5c") Then Throw New InvalidArgumentException("Ambiguous URL authority escape")
+        Dim port As String = ""
+        If String.StartsWith(authority, "[") Then
+            Dim closeBracket As Integer = String.InStr(authority, "]")
+            If closeBracket < 4 Then Throw New InvalidArgumentException("Invalid IP literal")
+            Dim address As String = String.Mid(authority, 2, closeBracket - 2)
+            ValidateIPLiteral(address)
+            Dim suffix As String = String.Mid(authority, closeBracket + 1)
+            If suffix <> "" Then
+                If Not String.StartsWith(suffix, ":") Then Throw New InvalidArgumentException("Invalid URL port")
+                port = String.Mid(suffix, 2)
+                If port = "" Then Throw New InvalidArgumentException("Invalid URL port")
+            End If
+        Else
+            If String.Contains(authority, "[") Or String.Contains(authority, "]") Then Throw New InvalidArgumentException("Invalid host")
+            Dim portStart As Integer = String.InStr(authority, ":")
+            If portStart > 0 Then
+                port = String.Mid(authority, portStart + 1)
+                If port = "" Then Throw New InvalidArgumentException("Invalid URL port")
+            End If
+        End If
+        Dim portValue As Integer = 0
+        For Each digit As String In String.Chars(port)
+            If Not String.Contains("0123456789", digit) Then Throw New InvalidArgumentException("Invalid URL port")
+            portValue = portValue * 10 + String.Asc(digit) - 48
+            If portValue > 65535 Then Throw New InvalidArgumentException("Invalid URL port")
+        Next
+    ElseIf scheme = "http" Or scheme = "https" Then
+        Throw New InvalidArgumentException("HTTP URL needs a host")
+    End If
+    Return url
+End Function
+
+Private Function PortableFile(file As FileSystemItem) As String
+    If file = Nil Then Throw New InvalidArgumentException("A file is required")
+    Dim filePath As String = file.NativePath
+    If filePath = "" Then Throw New InvalidArgumentException("A file path is required")
+    For Each character As String In String.Chars(filePath)
+        If String.Asc(character) = 0 Then Throw New InvalidArgumentException("File path contains NUL")
+    Next
+    #If TargetWindows Then
+        Return WindowsFilePath(filePath)
+    #Else
+        If Not file.Exists() Then Throw New InvalidArgumentException("File does not exist or is inaccessible")
+        Return filePath
+    #End If
+End Function
+#End If
+
+#If TargetLinux Then
+Private Optional Declare Function GOpen Lib "libgio-2.0.so.0" Alias "g_app_info_launch_default_for_uri" (uri As CString, context As Ptr, ByRef failure As Ptr) As Int32
+Private Optional Declare Function GFile Lib "libgio-2.0.so.0" Alias "g_file_new_for_path" (filePath As CString) As Ptr
+Private Optional Declare Function GFileURI Lib "libgio-2.0.so.0" Alias "g_file_get_uri" (file As Ptr) As CString
+Private Optional Declare Sub GFree Lib "libglib-2.0.so.0" Alias "g_free" (value As Ptr)
+Private Optional Declare Sub GUnref Lib "libgobject-2.0.so.0" Alias "g_object_unref" (value As Ptr)
+Private Optional Declare Sub GErrorFree Lib "libglib-2.0.so.0" Alias "g_error_free" (value As Ptr)
+Private Optional Declare Function GQuark Lib "libglib-2.0.so.0" Alias "g_quark_to_string" (domain As UInt32) As CString
+Private Optional Declare Function GBusAddress Lib "libgio-2.0.so.0" Alias "g_dbus_address_get_for_bus_sync" (kind As Int32, cancellable As Ptr, ByRef failure As Ptr) As CString
+Private Optional Declare Function GConnect Lib "libgio-2.0.so.0" Alias "g_dbus_connection_new_for_address_sync" (address As CString, nativeFlags As Int32, observer As Ptr, cancellable As Ptr, ByRef failure As Ptr) As Ptr
+Private Optional Declare Function GClose Lib "libgio-2.0.so.0" Alias "g_dbus_connection_close_sync" (connection As Ptr, cancellable As Ptr, ByRef failure As Ptr) As Int32
+Private Optional Declare Function GCall Lib "libgio-2.0.so.0" Alias "g_dbus_connection_call_sync" (connection As Ptr, bus As CString, filePath As CString, iface As CString, method As CString, parameters As Ptr, replyType As CString, nativeFlags As Int32, timeout As Int32, cancellable As Ptr, ByRef failure As Ptr) As Ptr
+Private Optional Declare Function GBuilder Lib "libglib-2.0.so.0" Alias "g_variant_builder_new" (valueType As CString) As Ptr
+Private Optional Declare Sub GBuilderAdd Lib "libglib-2.0.so.0" Alias "g_variant_builder_add_value" (builder As Ptr, value As Ptr)
+Private Optional Declare Function GBuilderEnd Lib "libglib-2.0.so.0" Alias "g_variant_builder_end" (builder As Ptr) As Ptr
+Private Optional Declare Sub GBuilderUnref Lib "libglib-2.0.so.0" Alias "g_variant_builder_unref" (builder As Ptr)
+Private Optional Declare Function GString Lib "libglib-2.0.so.0" Alias "g_variant_new_string" (value As CString) As Ptr
+Private Optional Declare Function GTuple Lib "libglib-2.0.so.0" Alias "g_variant_new_tuple" (children As Ptr, count As UInt64) As Ptr
+Private Optional Declare Function GSink Lib "libglib-2.0.so.0" Alias "g_variant_ref_sink" (value As Ptr) As Ptr
+Private Optional Declare Sub GVariantUnref Lib "libglib-2.0.so.0" Alias "g_variant_unref" (value As Ptr)
+
+Private Sub LinuxFailure(operation As String, failure As Ptr)
+    If failure = Nil Then Throw New WorkspaceException(operation, "buoy-workspace", -1)
+    Try
+        ' GError begins with guint32 domain and gint32 code; message is not copied.
+        Dim fields As New Bytes()
+        fields.Append(failure, 8)
+        Dim domainId As UInt32 = NativeRead32(fields, 0)
+        Dim nativeCode As Int32 = NativeRead32(fields, 4)
+        Dim domain As String = CType(GQuark(domainId), String)
+        Throw New WorkspaceException(operation, domain, nativeCode)
+    Finally
+        GErrorFree(failure)
+    End Try
+End Sub
+
+Private Function LinuxFileURI(filePath As String) As String
+    Dim file As Ptr = GFile(CType(filePath, CString))
+    If file = Nil Then Throw New WorkspaceException("file URI", "buoy-workspace", -1)
+    Try
+        Dim uri As CString = GFileURI(file)
+        If uri = Nil Then Throw New WorkspaceException("file URI", "buoy-workspace", -1)
+        Try
+            Return CType(uri, String)
+        Finally
+            GFree(uri)
+        End Try
+    Finally
+        GUnref(file)
+    End Try
+End Function
+
+Private Function LinuxOpen(uri As String) As Boolean
+    Dim failure As Ptr = Nil
+    If GOpen(CType(uri, CString), Nil, failure) = 0 Then LinuxFailure("open", failure)
+    Return True
+End Function
+
+Private Sub LinuxReveal(paths As Array Of String)
+    ' Build native strings, never a textual D-Bus expression or a command line.
+    Dim builder As Ptr = GBuilder(CType("as", CString))
+    Dim parameters As Ptr = Nil
+    Try
+        For Each filePath As String In paths
+            Dim uri As String = LinuxFileURI(filePath)
+            GBuilderAdd(builder, GString(CType(uri, CString)))
+        Next
+        Dim pair As Bytes = NativeBuffer(16)
+        NativeWritePointer(pair, 0, GBuilderEnd(builder))
+        NativeWritePointer(pair, 8, GString(CType("", CString)))
+        parameters = GSink(GTuple(pair.DataPtr(), 2))
+    Finally
+        GBuilderUnref(builder)
+    End Try
+    Try
+        Dim failure As Ptr = Nil
+        Dim address As CString = GBusAddress(2, Nil, failure)
+        If address = Nil Then LinuxFailure("reveal session bus address", failure)
+        Dim connection As Ptr = Nil
+        Try
+            ' Private connection: authentication client | message bus connection.
+            ' Unlike g_bus_get_sync, no shared exit-on-close connection is retained.
+            connection = GConnect(address, 9, Nil, Nil, failure)
+        Finally
+            GFree(address)
+        End Try
+        If connection = Nil Then LinuxFailure("reveal session bus", failure)
+        Try
+            ' Standard ShowItems(as URIs, s StartupId); unit reply; 5s call timeout.
+            Dim reply As Ptr = GCall(connection, CType("org.freedesktop.FileManager1", CString), CType("/org/freedesktop/FileManager1", CString), CType("org.freedesktop.FileManager1", CString), CType("ShowItems", CString), parameters, CType("()", CString), 0, 5000, Nil, failure)
+            If reply = Nil Then LinuxFailure("reveal ShowItems", failure)
+            GVariantUnref(reply)
+        Finally
+            Dim closeFailure As Ptr = Nil
+            GClose(connection, Nil, closeFailure)
+            If closeFailure <> Nil Then GErrorFree(closeFailure)
+            GUnref(connection)
+        End Try
+    Finally
+        GVariantUnref(parameters)
+    End Try
+End Sub
+#End If
+
+#If TargetWindows Then
+' SHELLEXECUTEINFOW: native 64-bit layout, 112 bytes on both x64 and ARM64.
+Private Optional Declare Function WOpen Lib "shell32" Alias "ShellExecuteExW" (info As Ptr) As Int32
+Private Optional Declare Function WParse Lib "shell32" Alias "SHParseDisplayName" (name As Ptr, context As Ptr, ByRef pidl As Ptr, attributes As UInt32, outputAttributes As Ptr) As Int32
+Private Optional Declare Function WReveal Lib "shell32" Alias "SHOpenFolderAndSelectItems" (pidl As Ptr, count As UInt32, children As Ptr, nativeFlags As UInt32) As Int32
+Private Optional Declare Function WClone Lib "shell32" Alias "ILClone" (pidl As Ptr) As Ptr
+Private Optional Declare Function WRemoveLast Lib "shell32" Alias "ILRemoveLastID" (pidl As Ptr) As Int32
+Private Optional Declare Function WLast Lib "shell32" Alias "ILFindLastID" (pidl As Ptr) As Ptr
+Private Optional Declare Function WEqual Lib "shell32" Alias "ILIsEqual" (left As Ptr, right As Ptr) As Int32
+Private Optional Declare Function WInit Lib "ole32" Alias "CoInitializeEx" (reserved As Ptr, nativeFlags As UInt32) As Int32
+Private Optional Declare Sub WUninit Lib "ole32" Alias "CoUninitialize" ()
+Private Optional Declare Sub WFree Lib "ole32" Alias "CoTaskMemFree" (value As Ptr)
+Private Optional Declare Function WFullPath Lib "kernel32" Alias "GetFullPathNameW" (value As Ptr, capacity As UInt32, buffer As Ptr, filePart As Ptr) As UInt32
+Private Optional Declare Function WAttributes Lib "kernel32" Alias "GetFileAttributesW" (value As Ptr) As UInt32
+Private Optional Declare Function WError Lib "kernel32" Alias "GetLastError" () As UInt32
+
+Private Function WindowsWide(value As String) As Bytes
+    Dim encoded As Bytes = value.AsUTF16LE()
+    If encoded.Count > 65532 Then Throw New InvalidArgumentException("Workspace target exceeds 32766 UTF-16 code units")
+    encoded.Append(0)
+    encoded.Append(0)
+    Return encoded
+End Function
+
+Private Function WindowsFilePath(value As String) As String
+    Dim encodedValue As Bytes = WindowsWide(value)
+    Dim buffer As New Bytes()
+    For i As Integer = 0 To 65535
+        buffer.Append(0)
+    Next
+    Dim count As Integer = WFullPath(encodedValue.DataPtr(), 32768, buffer.DataPtr(), Nil)
+    If count = 0 Then Throw New WorkspaceException("absolute file path", "Win32", WError())
+    If count >= 32768 Then Throw New InvalidArgumentException("File path exceeds native limit")
+    Dim attributes As UInt32 = WAttributes(buffer.DataPtr())
+    If attributes = 4294967295 Then Throw New WorkspaceException("inspect file", "Win32", WError())
+    Dim exact As New Bytes()
+    exact.Append(buffer.DataPtr(), count * 2)
+    Return String.FromUTF16LE(exact)
+End Function
+
+Private Sub WindowsInitialize()
+    ' Require an STA-compatible calling thread; do not change an existing MTA.
+    Dim statusCode As Int32 = WInit(Nil, 6)
+    If statusCode < 0 Then Throw New WorkspaceException("initialize COM STA", "HRESULT", statusCode)
+End Sub
+
+Private Function WindowsOpen(value As String) As Boolean
+    Dim text As Bytes = WindowsWide(value)
+    Dim verb As Bytes = WindowsWide("open")
+    WindowsInitialize()
+    Try
+        Dim info As Bytes = NativeBuffer(112)
+        NativeWrite32(info, 0, 112)
+        ' NOASYNC | FLAG_NO_UI. No process handle requested or retained.
+        NativeWrite32(info, 4, 1280)
+        NativeWritePointer(info, 16, verb.DataPtr())
+        NativeWritePointer(info, 24, text.DataPtr())
+        NativeWrite32(info, 48, 1)
+        If WOpen(info.DataPtr()) = 0 Then
+            Dim code As Integer = WError()
+            Throw New WorkspaceException("open", "Win32", code)
+        End If
+        Return True
+    Finally
+        WUninit()
+    End Try
+End Function
+
+Private Sub WindowsReveal(paths As Array Of String)
+    ' Parse every item and parent before opening any window. Borrow child IDs
+    ' from owned absolute PIDLs and group binary-identical parent PIDLs.
+    Dim pidls As Array Of Ptr = []
+    Dim parents As Array Of Ptr = []
+    WindowsInitialize()
+    Try
+        For Each filePath As String In paths
+            Dim text As Bytes = WindowsWide(filePath)
+            Dim pidl As Ptr = Nil
+            Dim statusCode As Int32 = WParse(text.DataPtr(), Nil, pidl, 0, Nil)
+            If statusCode < 0 Then
+                If pidl <> Nil Then WFree(pidl)
+                Throw New WorkspaceException("parse reveal item", "HRESULT", statusCode)
+            End If
+            If pidl = Nil Then Throw New WorkspaceException("parse reveal item", "buoy-workspace", -1)
+            Array.Append(pidls, pidl)
+        Next
+        For Each pidl As Ptr In pidls
+            Dim parent As Ptr = WClone(pidl)
+            If parent = Nil Then Throw New WorkspaceException("clone reveal parent", "buoy-workspace", -1)
+            If WRemoveLast(parent) = 0 Then
+                WFree(parent)
+                parent = Nil
+            End If
+            Array.Append(parents, parent)
+        Next
+        For i As Integer = 0 To Array.Count(pidls) - 1
+            If parents(i) = Nil Then
+                Dim statusCode As Int32 = WReveal(pidls(i), 0, Nil, 0)
+                If statusCode < 0 Then Throw New WorkspaceException("reveal", "HRESULT", statusCode)
+                Continue For
+            End If
+            Dim alreadySent As Boolean = False
+            For j As Integer = 0 To i - 1
+                If parents(j) <> Nil Then
+                    If WEqual(parents(i), parents(j)) <> 0 Then alreadySent = True
+                End If
+            Next
+            If alreadySent Then Continue For
+            Dim children As Bytes = NativeBuffer(Array.Count(pidls) * 8)
+            Dim count As UInt32 = 0
+            For j As Integer = i To Array.Count(pidls) - 1
+                If parents(j) <> Nil Then
+                    If WEqual(parents(i), parents(j)) <> 0 Then
+                        NativeWritePointer(children, count * 8, WLast(pidls(j)))
+                        count += 1
+                    End If
+                End If
+            Next
+            Dim statusCode As Int32 = WReveal(parents(i), count, children.DataPtr(), 0)
+            If statusCode < 0 Then Throw New WorkspaceException("reveal", "HRESULT", statusCode)
+        Next
+    Finally
+        For Each parent As Ptr In parents
+            If parent <> Nil Then WFree(parent)
+        Next
+        For Each pidl As Ptr In pidls
+            WFree(pidl)
+        Next
+        WUninit()
+    End Try
+End Sub
+#End If
