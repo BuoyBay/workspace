@@ -13,14 +13,14 @@ From a Buoy consumer project with BPM installed:
 
 ```sh
 bpm add workspace --git https://github.com/BuoyBay/workspace.git --rev refs/heads/main
-```
+```basic
 
 BPM records the resolved commit in its lockfile. Keep that lockfile with the
 consumer project for reproducible installs.
 
 ## Example
 
-```buoy
+```basic
 Import workspace
 
 Sub Main()
@@ -56,8 +56,6 @@ On your own machine, install Buoy and run:
 ```sh
 buoy ai init --both
 ```
-
-The generated agent files and editor settings stay local and are ignored by Git.
 
 ## Contributing
 

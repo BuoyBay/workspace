@@ -51,7 +51,7 @@ attribute inspection, preserving non-BMP filenames. Relative paths depend on the
 process working directory; avoid changing it concurrently. Existence checks do
 not eliminate races or bypass permissions. **BUI-003 limitation:** the current
 Buoy runtime can discard NUL before a String reaches this API; the validator
-cannot recover discarded input. The receipt explicitly records that test gap.
+cannot recover discarded input.
 
 Only open items the user chose: native file handlers can execute application
 bundles, executables or automation documents. The package constructs no shell
@@ -94,14 +94,10 @@ inaccessible files retain their native Win32 codes; Linux existence rejection
 uses `InvalidArgumentException` because FileSystemItem cannot distinguish causes.
 
 Native buffers use documented 64-bit little-endian ABI layouts (Linux/Windows
-x64 and ARM64). The Windows fixture compiler checks `SHELLEXECUTEINFOW` size and
-field offsets against platform headers. Private byte-buffer helpers avoid
-exporting ABI structures through Buoy's non-public-import visibility limitation;
-the narrow repro is retained for parent triage. No public pointer API is exposed.
-
+x64 and ARM64). Private byte-buffer helpers avoid
+exporting ABI structures through Buoy's non-public-import visibility limitation. No public pointer API is exposed.
 
 [Full typed API](typed-api.md) · [Getting started](getting-started.md)
-
 
 ## Custom-scheme and input limitations
 
