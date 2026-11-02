@@ -1,4 +1,4 @@
-# Open URLs and reveal files through the desktop shell
+# Desktop shell: open URLs, reveal files
 
 `Import workspace` provides native open/reveal integration on macOS, Linux and
 Windows. Existing macOS signatures and implementation bodies are preserved.

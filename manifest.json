@@ -1,14 +1,14 @@
 {
-  "schema": 1,
-  "name": "workspace",
-  "version": "0.1.0",
-  "description": "Native macOS, Linux GIO and Windows Shell open/reveal integration for Buoy",
-  "platforms": [
-    "arm64-apple-macos",
-    "x86_64-apple-macos",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
-    "arm64-pc-windows-msvc"
-  ]
+    "schema": 1,
+    "name": "workspace",
+    "version": "0.1.0",
+    "description": "Desktop shell: open URLs, reveal files",
+    "platforms": [
+        "arm64-apple-macos",
+        "x86_64-apple-macos",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "arm64-pc-windows-msvc"
+    ]
 }
