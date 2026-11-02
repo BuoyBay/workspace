@@ -2,7 +2,7 @@
     "schema": 1,
     "name": "workspace",
     "version": "0.1.0",
-    "description": "Desktop shell: open URLs, reveal files",
+    "description": "Open URLs, reveal files",
     "platforms": [
         "arm64-apple-macos",
         "x86_64-apple-macos",
